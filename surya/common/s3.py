@@ -122,9 +122,20 @@ def download_directory(remote_path: str, local_dir: str):
 
         pbar.close()
 
-        # Move all files to new directory
+        # Move all files to new directory.
+        # Windows 上 shutil.move 遇到同名目标会直接抛 Error（不像 POSIX 会覆盖），
+        # 而这里最常见的场景恰恰是“上次下载中断、目标目录只落了一半文件”：check_manifest
+        # 判定不完整 → 走到这里重新下载 → 遇到已存在的文件直接硬失败，用户只能手动删目录。
+        # 因此先清掉同名目标再移动，让这条路径对任何残留状态都幂等。
         for file in os.listdir(temp_dir):
-            shutil.move(os.path.join(temp_dir, file), local_dir)
+            src = os.path.join(temp_dir, file)
+            dst = os.path.join(local_dir, file)
+            if os.path.exists(dst):
+                if os.path.isdir(dst):
+                    shutil.rmtree(dst)
+                else:
+                    os.remove(dst)
+            shutil.move(src, dst)
 
 
 class S3DownloaderMixin:

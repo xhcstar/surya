@@ -32,6 +32,7 @@ import argparse
 import concurrent.futures
 import json
 import os
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -131,8 +132,16 @@ def _download_s3_directory(base_url: str, remote_dir: str, local_dir: Path, work
     """按 manifest.json 下载一个 s3 目录（与 surya.common.s3 的落地布局一致）。"""
     local_dir.mkdir(parents=True, exist_ok=True)
     manifest_url = _join_url(_join_url(base_url, remote_dir), "manifest.json")
-    manifest = json.loads(_http_get_bytes(manifest_url).decode("utf-8"))
+    manifest_bytes = _http_get_bytes(manifest_url)
+    manifest = json.loads(manifest_bytes.decode("utf-8"))
     files = manifest.get("files") or []
+
+    # manifest.json 本身也必须落进目录：surya 的 check_manifest() 正是靠它判断“模型已完整”。
+    # 少了它，surya 会认定模型不存在而重新下载——在 Windows 上还会撞上 shutil.move 的
+    # “目标已存在”硬失败。写在这里（而不是下载循环里）是因为它不属于 manifest["files"]。
+    manifest_path = local_dir / "manifest.json"
+    if not manifest_path.is_file():
+        manifest_path.write_bytes(manifest_bytes)
 
     missing = [rel for rel in files if not (local_dir / rel).exists()]
     if not missing:
@@ -186,6 +195,35 @@ def _resolve_dest(args) -> Path:
     return (Path(args.dest).expanduser().resolve() / args.dir).resolve()
 
 
+def _materialize_symlinks(root: Path) -> int:
+    """把 HF 缓存里指回 `blobs/` 的符号链接替换成真实文件副本。
+
+    为什么要这一步：huggingface_hub 的缓存布局是 `blobs/<hash>` 加
+    `snapshots/<rev>/<name>` 符号链接。把这种目录打成 zip 分发时，链接很容易丢失
+    （被解压工具跳过、或拷成一个只含目标路径的文本文件），对方机器上就会出现
+    「目录看着在、模型实际不可用」这种最难排查的故障。物化一次之后，包在任何
+    解压/拷贝工具下都能用。
+
+    返回被替换的链接数量。
+    """
+    replaced = 0
+    for path in root.rglob("*"):
+        try:
+            if not path.is_symlink():
+                continue
+            target = Path(os.path.realpath(path))
+            if not target.is_file():
+                continue
+            tmp = path.with_name(path.name + ".materialize-part")
+            shutil.copyfile(target, tmp)
+            os.remove(path)
+            os.replace(tmp, path)
+            replaced += 1
+        except Exception as exc:  # noqa: BLE001
+            print(f"materialize failed for {path}: {exc}", file=sys.stderr)
+    return replaced
+
+
 def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Download Surya models into a local folder, without importing surya."
@@ -197,6 +235,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser.add_argument("--only", choices=["all", "s3", "hf"], default="all", help="只下载某一类。")
     parser.add_argument("--with-vllm-weights", action="store_true",
                         help="额外下载 vLLM 用的 HF 权重（datalab-to/surya-ocr-2）。")
+    parser.add_argument("--materialize", action="store_true",
+                        help="下载后把 HF 缓存里的符号链接替换成真实文件——"
+                             "用于打包离线模型（链接在 zip 分发里极易丢失）。")
     parser.add_argument("--progress_json", action="store_true", help="逐行输出 JSON 进度。")
     args = parser.parse_args(list(argv) if argv is not None else None)
 
@@ -236,6 +277,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         for repo, info in merged.items():
             print(f"[{', '.join(info['names'])}] hf://{repo}", flush=True)
             _download_hf_repo(repo, sorted(info["patterns"]), progress, repo)
+
+    if args.materialize:
+        replaced = _materialize_symlinks(dest_dir)
+        print(f"Materialized {replaced} symlink(s) into real files.", flush=True)
+        _emit(progress, phase="materialize", current=1, total=1,
+              message=f"已物化 {replaced} 个符号链接")
 
     print("", flush=True)
     print(f"Done. Models are under: {dest_dir}", flush=True)
