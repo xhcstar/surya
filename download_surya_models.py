@@ -51,11 +51,17 @@ S3_CHECKPOINTS: List[Tuple[str, str]] = [
     ("OCR_ERROR_MODEL_CHECKPOINT", "ocr_error_detection/2025_02_18"),
 ]
 
-# HF 仓库与其需要拉取的文件模式。用 allow_patterns 跳过 assets/ 之类的示例图。
+# HF 仓库。**不做 allow_patterns 过滤**：必须拉成"完整快照"。
+#
+# 原因：marker 运行时会进入 HF 离线模式（模型已在本地，避免每次转换都先去 HF API
+# 核对 revision——大陆网络下那个请求经常抖动，会直接把整次转换打断）。而
+# huggingface_hub 在离线模式下会拿下载时留下的仓库清单 `trees/<rev>.json` 逐个核对
+# 本地文件，只要缺一个（哪怕是不参与推理的 LICENSE / README.md）就抛
+# IncompleteSnapshotError。因此这里必须整仓拉取，多出来的几十 KB 换的是"离线可用"。
 HF_CHECKPOINTS: List[Tuple[str, str, List[str]]] = [
-    ("SURYA_GGUF_REPO", "datalab-to/surya-ocr-2-gguf", ["*.gguf"]),
-    ("FAST_LAYOUT_MODEL_CHECKPOINT", "datalab-to/surya_layout2", ["*.json", "*.pth", "*.pt"]),
-    ("FAST_ORDER_MODEL_CHECKPOINT", "datalab-to/surya_layout2", ["*.json", "*.pt"]),
+    ("SURYA_GGUF_REPO", "datalab-to/surya-ocr-2-gguf", []),
+    ("FAST_LAYOUT_MODEL_CHECKPOINT", "datalab-to/surya_layout2", []),
+    ("FAST_ORDER_MODEL_CHECKPOINT", "datalab-to/surya_layout2", []),
 ]
 
 # vLLM 后端用的 HF 权重（Windows 上我们用 llama.cpp，默认不下载）。
@@ -186,7 +192,8 @@ def _download_hf_repo(repo_id: str, allow_patterns: List[str], progress: bool, l
     _emit(progress, phase="hf", current=0, total=0, message=f"下载 {label}（{repo_id}）")
     snapshot_download(
         repo_id=repo_id,
-        allow_patterns=allow_patterns,
+        # 空列表视为“不加过滤”，即整仓拉取（保证离线模式可用，见上面的说明）。
+        allow_patterns=allow_patterns or None,
         max_workers=8,
     )
     _emit(progress, phase="hf", current=1, total=1, message=f"{label} 就绪")
