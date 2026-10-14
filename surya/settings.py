@@ -1,4 +1,5 @@
 import os
+import sys
 from typing import Callable, Dict, Optional
 
 import torch
@@ -7,6 +8,41 @@ from pydantic import computed_field
 from pydantic_settings import BaseSettings
 from pathlib import Path
 from platformdirs import user_cache_dir
+
+
+def _resolve_guaxi_model_cache_dir() -> Optional[Path]:
+    """把模型缓存重定向到 Guaxi 应用目录下的 utils/Models/surya_models。
+
+    Guaxi 需要模型固定落在软件目录内（随安装目录分发 / 可离线加载），而不是
+    跟随 platformdirs 落到用户缓存目录。依次尝试：
+    1) 解释器路径里包含 utils/ 时，取其上一级作为软件根目录；
+    2) 否则从 CWD 往上找带 utils/ 的目录。
+    两者都失败时返回 None，由调用方回退到 datalab 默认缓存目录。
+    """
+    exe = None
+    try:
+        exe = Path(sys.executable).resolve()
+    except Exception:
+        pass
+
+    if exe is not None:
+        parts = [p.lower() for p in exe.parts]
+        if "utils" in parts:
+            idx = len(parts) - 1 - parts[::-1].index("utils")
+            base = Path(*exe.parts[:idx])
+            return base / "utils" / "Models" / "surya_models"
+
+    try:
+        cwd = Path.cwd().resolve()
+        paths = [cwd]
+        paths.extend(cwd.parents)
+        for p in paths:
+            if (p / "utils").exists():
+                return p / "utils" / "Models" / "surya_models"
+    except Exception:
+        pass
+
+    return None
 
 
 class Settings(BaseSettings):
@@ -18,7 +54,9 @@ class Settings(BaseSettings):
     DISABLE_TQDM: bool = False
     S3_BASE_URL: str = "https://models.datalab.to"
     PARALLEL_DOWNLOAD_WORKERS: int = 10
-    MODEL_CACHE_DIR: str = str(Path(user_cache_dir("datalab")) / "models")
+    MODEL_CACHE_DIR: str = str(
+        _resolve_guaxi_model_cache_dir() or (Path(user_cache_dir("datalab")) / "models")
+    )
     LOGLEVEL: str = "INFO"
 
     # Paths
