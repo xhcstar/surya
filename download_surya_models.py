@@ -34,6 +34,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Iterable, List, Optional, Tuple
@@ -153,7 +154,7 @@ def _download_s3_directory(base_url: str, remote_dir: str, local_dir: Path, work
           message=f"下载 {remote_dir}（缺 {len(missing)}/{len(files)} 个文件）")
 
     done = 0
-    counter_lock = __import__("threading").Lock()
+    counter_lock = threading.Lock()
 
     def _task(rel: str) -> None:
         nonlocal done
